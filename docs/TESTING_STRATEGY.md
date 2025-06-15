@@ -1,129 +1,100 @@
-# Testing Strategy for ProdReady
+# Testing Strategy
 
-## Overview
-
-ProdReady's testing strategy ensures reliability, accuracy, and maintainability through comprehensive automated testing at multiple levels. Our goal is 90%+ code coverage with a focus on real-world scenarios.
+This document outlines the comprehensive testing approach for ProdReady to ensure reliability, accuracy, and maintainability.
 
 ## Testing Philosophy
 
-1. **Real-World First**: Test with actual AI-generated code patterns
-2. **Fast Feedback**: Unit tests run in <10 seconds, integration in <1 minute
-3. **Prevent Regressions**: Every bug becomes a test case
-4. **Test the Fix**: Verify fixes work and don't break existing code
-5. **Educational Value**: Tests document expected behavior
+1. **Test Real Scenarios** - Use actual AI-generated code as test cases
+2. **Fast Feedback** - Most tests should run in milliseconds
+3. **Prevent Regressions** - Every bug becomes a test
+4. **Test the Fix** - Ensure fixes actually work
+5. **User-Centric** - Test the experience, not just the code
 
-## Testing Pyramid
+## Testing Levels
 
-```
-         ╱─────────────╲
-        ╱   E2E Tests   ╲       5%
-       ╱─────────────────╲
-      ╱ Integration Tests ╲     20%
-     ╱───────────────────────╲
-    ╱     Unit Tests         ╲  75%
-   ╱─────────────────────────────╲
-```
+### 1. Unit Tests
 
-## Test Categories
+Test individual components in isolation.
 
-### 1. Unit Tests (75% of tests)
-
-Fast, isolated tests for individual components.
-
-#### Detector Unit Tests
+#### Analyzer Tests
 
 ```typescript
-// test/detectors/security/sql-injection.test.ts
-import { SQLInjectionDetector } from '@/detectors/security/sql-injection';
-import { parse } from '@/parsers/javascript';
-import { createMockContext } from '@/test-utils';
-
-describe('SQLInjectionDetector', () => {
-  let detector: SQLInjectionDetector;
-  let context: FileContext;
+// tests/analyzers/security/sql-injection.test.ts
+describe('SQLInjectionAnalyzer', () => {
+  let analyzer: SQLInjectionAnalyzer;
   
   beforeEach(() => {
-    detector = new SQLInjectionDetector();
-    context = createMockContext();
+    analyzer = new SQLInjectionAnalyzer();
   });
   
-  describe('vulnerability detection', () => {
-    it('detects string concatenation in query', async () => {
+  describe('String Concatenation', () => {
+    it('detects basic string concatenation', async () => {
       const code = `
-        const userId = req.params.id;
-        db.query("SELECT * FROM users WHERE id = " + userId);
+        app.get('/user/:id', async (req, res) => {
+          const user = await db.query("SELECT * FROM users WHERE id = " + req.params.id);
+          res.json(user);
+        });
       `;
       
       const ast = parse(code);
-      const issues = await detector.detect(ast, context);
+      const issues = await analyzer.analyze(ast, {} as Context);
       
       expect(issues).toHaveLength(1);
       expect(issues[0]).toMatchObject({
         type: 'sql-injection',
         severity: 'critical',
         line: 3,
-        message: expect.stringContaining('SQL injection')
+        column: 23
       });
     });
     
     it('detects template literal injection', async () => {
       const code = `
-        db.query(\`SELECT * FROM users WHERE name = '\${userName}'\`);
+        const query = \`SELECT * FROM users WHERE name = '\${username}'\`;
+        db.query(query);
       `;
       
-      const issues = await detector.detect(parse(code), context);
+      const issues = await analyzer.analyze(parse(code), {} as Context);
       expect(issues).toHaveLength(1);
     });
     
-    it('detects SQL in loop (N+1 risk)', async () => {
+    it('ignores parameterized queries', async () => {
       const code = `
-        users.forEach(user => {
-          db.query("SELECT * FROM orders WHERE user_id = " + user.id);
-        });
+        const user = await db.query("SELECT * FROM users WHERE id = ?", [userId]);
       `;
       
-      const issues = await detector.detect(parse(code), context);
-      expect(issues).toHaveLength(2); // SQL injection + N+1
+      const issues = await analyzer.analyze(parse(code), {} as Context);
+      expect(issues).toHaveLength(0);
     });
   });
   
-  describe('safe patterns', () => {
-    it('allows parameterized queries', async () => {
+  describe('Edge Cases', () => {
+    it('handles complex concatenation', async () => {
       const code = `
-        db.query("SELECT * FROM users WHERE id = ?", [userId]);
+        const query = "SELECT * FROM " + table + " WHERE id = " + id;
       `;
       
-      const issues = await detector.detect(parse(code), context);
-      expect(issues).toHaveLength(0);
+      const issues = await analyzer.analyze(parse(code), {} as Context);
+      expect(issues).toHaveLength(1);
     });
     
-    it('allows query builders', async () => {
+    it('detects SQL in template functions', async () => {
       const code = `
-        db.select('*').from('users').where('id', userId);
+        const result = await sql\`SELECT * FROM users WHERE id = \${id}\`;
       `;
       
-      const issues = await detector.detect(parse(code), context);
-      expect(issues).toHaveLength(0);
-    });
-  });
-  
-  describe('edge cases', () => {
-    it('handles nested function calls', async () => {
-      const code = `
-        db.query(buildQuery("SELECT * FROM users WHERE id = " + getId()));
-      `;
-      
-      const issues = await detector.detect(parse(code), context);
+      // Should detect unless it's a known safe template tag
+      const issues = await analyzer.analyze(parse(code), {} as Context);
       expect(issues).toHaveLength(1);
     });
   });
 });
 ```
 
-#### Fixer Unit Tests
+#### Transformer Tests
 
 ```typescript
-// test/fixers/security/sql-injection-fixer.test.ts
+// tests/transformers/security/sql-injection-fixer.test.ts
 describe('SQLInjectionFixer', () => {
   let fixer: SQLInjectionFixer;
   
@@ -131,164 +102,244 @@ describe('SQLInjectionFixer', () => {
     fixer = new SQLInjectionFixer();
   });
   
-  it('converts string concatenation to parameters', async () => {
-    const input = `db.query("SELECT * FROM users WHERE id = " + userId);`;
-    const expected = `db.query("SELECT * FROM users WHERE id = ?", [userId]);`;
-    
-    const result = await fixer.fix(input, issues[0]);
-    
-    expect(result.code).toBe(expected);
-    expect(result.explanation).toContain('parameterized query');
-  });
-  
-  it('handles multiple injections', async () => {
+  it('converts string concatenation to parameterized query', async () => {
     const input = `
-      db.query("SELECT * FROM users WHERE id = " + id + " AND name = '" + name + "'");
+      const user = await db.query("SELECT * FROM users WHERE id = " + userId);
     `;
+    
     const expected = `
-      db.query("SELECT * FROM users WHERE id = ? AND name = ?", [id, name]);
+      const user = await db.query("SELECT * FROM users WHERE id = ?", [userId]);
     `;
     
-    const result = await fixer.fix(input, issues[0]);
-    expect(result.code).toBe(expected);
+    const result = await fixer.fix(input);
+    expect(normalize(result)).toBe(normalize(expected));
   });
   
-  it('preserves query formatting', async () => {
+  it('handles multiple parameters', async () => {
     const input = `
-      db.query(
-        "SELECT * FROM users " +
-        "WHERE id = " + userId
+      db.query("SELECT * FROM users WHERE age > " + minAge + " AND age < " + maxAge);
+    `;
+    
+    const expected = `
+      db.query("SELECT * FROM users WHERE age > ? AND age < ?", [minAge, maxAge]);
+    `;
+    
+    const result = await fixer.fix(input);
+    expect(normalize(result)).toBe(normalize(expected));
+  });
+  
+  it('preserves query structure', async () => {
+    const input = `
+      const complex = await db.query(
+        "SELECT u.*, p.* " +
+        "FROM users u " +
+        "JOIN posts p ON u.id = p.user_id " +
+        "WHERE u.id = " + id
       );
     `;
     
-    const result = await fixer.fix(input, issues[0]);
-    expect(result.code).toMatchSnapshot();
+    const result = await fixer.fix(input);
+    expect(result).toContain('?');
+    expect(result).toContain('[id]');
+    expect(result).toContain('JOIN posts');
   });
 });
 ```
 
-#### Parser Unit Tests
+### 2. Integration Tests
+
+Test complete workflows and component interactions.
 
 ```typescript
-// test/parsers/javascript.test.ts
-describe('JavaScriptParser', () => {
-  it('parses ES6+ syntax', () => {
-    const code = `
-      const fn = async (x) => await x?.foo?.();
-    `;
+// tests/integration/express-api.test.ts
+describe('Express API Analysis', () => {
+  it('analyzes a complete Express app', async () => {
+    const projectPath = 'tests/fixtures/express-blog-api';
     
-    const ast = parser.parse(code);
-    expect(ast.type).toBe('Program');
-    expect(ast.errors).toHaveLength(0);
-  });
-  
-  it('handles JSX', () => {
-    const code = `<Button onClick={() => {}}>{children}</Button>`;
-    const ast = parser.parse(code);
-    expect(ast.errors).toHaveLength(0);
-  });
-});
-```
-
-### 2. Integration Tests (20% of tests)
-
-Test how components work together.
-
-#### File Analysis Integration
-
-```typescript
-// test/integration/file-analysis.test.ts
-describe('File Analysis Integration', () => {
-  it('analyzes a complete Express API file', async () => {
-    const filePath = 'test/fixtures/express-api.js';
-    const analyzer = new FileAnalyzer();
+    const engine = new ProdReadyEngine();
+    const result = await engine.analyze(projectPath);
     
-    const result = await analyzer.analyze(filePath);
+    // Should find common issues
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({ type: 'sql-injection' })
+    );
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({ type: 'no-error-handling' })
+    );
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({ type: 'no-rate-limiting' })
+    );
     
+    // Score should reflect issues
     expect(result.score).toBeLessThan(50);
-    expect(result.issues).toContainEqual(
-      expect.objectContaining({
-        type: 'sql-injection'
-      })
-    );
-    expect(result.issues).toContainEqual(
-      expect.objectContaining({
-        type: 'no-error-handling'
-      })
-    );
   });
   
-  it('applies all fixes correctly', async () => {
-    const transformer = new Transformer();
-    const result = await transformer.transform(analysis);
+  it('fixes issues and improves score', async () => {
+    const projectPath = 'tests/fixtures/express-blog-api';
     
-    // Re-analyze fixed code
-    const fixedAnalysis = await analyzer.analyze(result.code);
-    expect(fixedAnalysis.score).toBeGreaterThan(90);
-  });
-});
-```
-
-#### Context-Aware Detection
-
-```typescript
-// test/integration/context-detection.test.ts
-describe('Context-Aware Detection', () => {
-  it('applies PCI compliance to payment code', async () => {
-    const code = `
-      async function processPayment(cardNumber, amount) {
-        const charge = await stripe.charges.create({
-          amount: amount * 100,
-          source: cardNumber
-        });
-        console.log(charge);
-        return charge;
-      }
-    `;
+    const engine = new ProdReadyEngine();
+    const analysis = await engine.analyze(projectPath);
+    const beforeScore = analysis.score;
     
-    const analysis = await analyzer.analyze(code);
+    // Apply fixes
+    const fixResult = await engine.fix(analysis);
     
-    expect(analysis.context).toContain('payment');
-    expect(analysis.issues).toContainEqual(
-      expect.objectContaining({
-        type: 'pci-compliance',
-        message: expect.stringContaining('PCI')
-      })
+    // Re-analyze
+    const afterAnalysis = await engine.analyze(projectPath);
+    
+    expect(afterAnalysis.score).toBeGreaterThan(beforeScore);
+    expect(afterAnalysis.issues.length).toBeLessThan(analysis.issues.length);
+    
+    // Verify specific fixes
+    const sqlInjectionFixed = !afterAnalysis.issues.find(
+      i => i.type === 'sql-injection'
     );
+    expect(sqlInjectionFixed).toBe(true);
   });
 });
 ```
 
-### 3. End-to-End Tests (5% of tests)
+### 3. Snapshot Tests
 
-Test complete workflows.
+Ensure transformations remain consistent.
 
 ```typescript
-// test/e2e/cli.test.ts
-describe('CLI E2E Tests', () => {
+// tests/snapshots/transformations.test.ts
+describe('Transformation Snapshots', () => {
+  const scenarios = [
+    'sql-injection-basic',
+    'no-error-handling-async',
+    'hardcoded-secrets-api-key',
+    'xss-template-literal',
+    'no-input-validation-express'
+  ];
+  
+  scenarios.forEach(scenario => {
+    it(`transforms ${scenario} correctly`, async () => {
+      const input = await readFixture(`${scenario}/input.js`);
+      const engine = new ProdReadyEngine();
+      
+      const result = await engine.transformFile(input);
+      
+      expect(result.code).toMatchSnapshot();
+      expect(result.fixes).toMatchSnapshot();
+    });
+  });
+});
+```
+
+### 4. Performance Tests
+
+Ensure ProdReady performs well on real codebases.
+
+```typescript
+// tests/performance/large-codebase.test.ts
+describe('Performance', () => {
+  it('analyzes 1000 files in under 10 seconds', async () => {
+    const projectPath = 'tests/fixtures/large-project';
+    
+    const start = Date.now();
+    const engine = new ProdReadyEngine();
+    await engine.analyze(projectPath);
+    const duration = Date.now() - start;
+    
+    expect(duration).toBeLessThan(10000);
+  });
+  
+  it('uses less than 500MB memory', async () => {
+    const projectPath = 'tests/fixtures/large-project';
+    const initialMemory = process.memoryUsage().heapUsed;
+    
+    const engine = new ProdReadyEngine();
+    await engine.analyze(projectPath);
+    
+    const memoryUsed = process.memoryUsage().heapUsed - initialMemory;
+    expect(memoryUsed).toBeLessThan(500 * 1024 * 1024);
+  });
+  
+  it('handles concurrent file analysis', async () => {
+    const files = Array.from({ length: 100 }, (_, i) => 
+      `tests/fixtures/concurrent/file${i}.js`
+    );
+    
+    const engine = new ProdReadyEngine();
+    const start = Date.now();
+    
+    await Promise.all(files.map(f => engine.analyzeFile(f)));
+    
+    const duration = Date.now() - start;
+    expect(duration).toBeLessThan(2000); // Should parallelize well
+  });
+});
+```
+
+### 5. End-to-End Tests
+
+Test the complete CLI experience.
+
+```typescript
+// tests/e2e/cli.test.ts
+describe('CLI E2E', () => {
   it('scans and fixes a project', async () => {
-    const projectPath = 'test/fixtures/ai-generated-api';
+    const projectDir = await createTempProject('express-api');
     
     // Run scan
-    const scanResult = await runCLI(['scan', projectPath]);
-    expect(scanResult.stdout).toContain('Found 23 issues');
-    expect(scanResult.stdout).toContain('Score: 34/100');
+    const scanResult = await execa('prodready', ['scan', projectDir]);
+    expect(scanResult.stdout).toContain('Production Readiness Score');
+    expect(scanResult.stdout).toMatch(/\d+\/100/);
     
     // Run fix
-    const fixResult = await runCLI(['fix', projectPath, '--yes']);
-    expect(fixResult.stdout).toContain('Fixed 20 issues');
+    const fixResult = await execa('prodready', ['fix', projectDir]);
+    expect(fixResult.stdout).toContain('Applied');
+    expect(fixResult.stdout).toContain('fixes');
     
-    // Verify improvement
-    const rescanResult = await runCLI(['scan', projectPath]);
-    expect(rescanResult.stdout).toContain('Score: 92/100');
+    // Verify files changed
+    const gitStatus = await execa('git', ['status', '--porcelain'], {
+      cwd: projectDir
+    });
+    expect(gitStatus.stdout).not.toBe('');
   });
   
-  it('generates report', async () => {
-    const result = await runCLI(['report', projectPath, '--format=html']);
+  it('respects configuration file', async () => {
+    const projectDir = await createTempProject('configured-project');
+    await writeFile(
+      path.join(projectDir, '.prodready.yml'),
+      `
+        analyzers:
+          security:
+            sql-injection:
+              enabled: false
+      `
+    );
     
-    const report = fs.readFileSync('prodready-report.html', 'utf-8');
-    expect(report).toContain('Production Readiness Report');
-    expect(report).toContain('Security: 95/100');
+    const result = await execa('prodready', ['scan', projectDir]);
+    expect(result.stdout).not.toContain('SQL Injection');
+  });
+});
+```
+
+### 6. Visual Regression Tests
+
+Ensure CLI output remains beautiful.
+
+```typescript
+// tests/visual/cli-output.test.ts
+describe('CLI Visual Output', () => {
+  it('displays scan results correctly', async () => {
+    const mockData = {
+      score: 35,
+      issues: [
+        { type: 'sql-injection', severity: 'critical', count: 2 },
+        { type: 'no-error-handling', severity: 'high', count: 5 }
+      ]
+    };
+    
+    const output = renderScanResults(mockData);
+    expect(output).toMatchSnapshot();
+    
+    // Test specific visual elements
+    expect(output).toContain('🔴'); // Critical marker
+    expect(output).toContain('35/100'); // Score
   });
 });
 ```
@@ -297,155 +348,129 @@ describe('CLI E2E Tests', () => {
 
 ### AI-Generated Code Samples
 
-Store real AI-generated code as test fixtures:
+Collect real examples from various AI tools:
 
 ```
-test/fixtures/
+tests/fixtures/
 ├── chatgpt/
-│   ├── express-api-basic.js
-│   ├── user-auth-system.js
-│   └── payment-processor.js
+│   ├── express-api/
+│   ├── react-app/
+│   └── cli-tool/
+├── github-copilot/
+│   ├── rest-api/
+│   └── websocket-server/
 ├── claude/
-│   ├── rest-api.js
-│   ├── websocket-server.js
-│   └── data-pipeline.js
-└── copilot/
-    ├── crud-operations.js
-    ├── file-upload.js
-    └── email-service.js
+│   ├── graphql-server/
+│   └── microservice/
+└── common-patterns/
+    ├── crud-api/
+    ├── auth-system/
+    └── payment-integration/
 ```
 
-### Vulnerability Patterns
+### Known Vulnerabilities
 
-```typescript
-// test/fixtures/vulnerabilities/sql-injection.js
-export const SQL_INJECTION_PATTERNS = [
+Test against real vulnerability patterns:
+
+```javascript
+// tests/fixtures/vulnerabilities/sqli-variations.js
+module.exports = [
   {
     name: 'Basic concatenation',
-    vulnerable: `db.query("SELECT * FROM users WHERE id = " + id)`,
-    fixed: `db.query("SELECT * FROM users WHERE id = ?", [id])`
+    code: 'db.query("SELECT * FROM users WHERE id = " + id)',
+    fixed: 'db.query("SELECT * FROM users WHERE id = ?", [id])'
   },
   {
     name: 'Template literal',
-    vulnerable: `db.query(\`SELECT * FROM users WHERE id = \${id}\`)`,
-    fixed: `db.query("SELECT * FROM users WHERE id = ?", [id])`
+    code: 'db.query(`SELECT * FROM users WHERE id = ${id}`)',
+    fixed: 'db.query("SELECT * FROM users WHERE id = ?", [id])'
   },
   {
-    name: 'Multiple parameters',
-    vulnerable: `db.query("SELECT * FROM users WHERE id = " + id + " AND status = '" + status + "'")`,
-    fixed: `db.query("SELECT * FROM users WHERE id = ? AND status = ?", [id, status])`
+    name: 'Complex query building',
+    code: `
+      let query = "SELECT * FROM users WHERE 1=1";
+      if (name) query += " AND name = '" + name + "'";
+      if (age) query += " AND age = " + age;
+      db.query(query);
+    `,
+    fixed: `
+      let query = "SELECT * FROM users WHERE 1=1";
+      const params = [];
+      if (name) {
+        query += " AND name = ?";
+        params.push(name);
+      }
+      if (age) {
+        query += " AND age = ?";
+        params.push(age);
+      }
+      db.query(query, params);
+    `
   }
 ];
 ```
 
-## Performance Testing
+## Testing Utilities
+
+### Code Normalization
 
 ```typescript
-// test/performance/analyzer.perf.ts
-describe('Analyzer Performance', () => {
-  it('analyzes 1000 lines in <1 second', async () => {
-    const largeFile = generateLargeFile(1000);
-    
-    const start = performance.now();
-    await analyzer.analyze(largeFile);
-    const duration = performance.now() - start;
-    
-    expect(duration).toBeLessThan(1000);
+// tests/utils/normalize.ts
+export function normalize(code: string): string {
+  // Remove extra whitespace, normalize line endings
+  return code
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/\s*{\s*/g, ' { ')
+    .replace(/\s*}\s*/g, ' } ')
+    .replace(/\s*;\s*/g, '; ');
+}
+```
+
+### AST Helpers
+
+```typescript
+// tests/utils/ast.ts
+export function findNode(ast: AST, type: string): Node | null {
+  let found: Node | null = null;
+  
+  traverse(ast, {
+    [type]: (path) => {
+      found = path.node;
+      path.stop();
+    }
   });
   
-  it('analyzes project with 100 files in <30 seconds', async () => {
-    const start = performance.now();
-    await analyzer.analyzeProject('test/fixtures/large-project');
-    const duration = performance.now() - start;
-    
-    expect(duration).toBeLessThan(30000);
-  });
-});
-```
+  return found;
+}
 
-## Mutation Testing
-
-Use Stryker for mutation testing:
-
-```javascript
-// stryker.conf.js
-module.exports = {
-  mutate: ['src/**/*.ts', '!src/**/*.test.ts'],
-  testRunner: 'jest',
-  coverageAnalysis: 'perTest',
-  thresholds: { high: 90, low: 80, break: 75 }
-};
-```
-
-## Snapshot Testing
-
-For complex transformations:
-
-```typescript
-// test/snapshots/transform.test.ts
-describe('Transform Snapshots', () => {
-  const files = fs.readdirSync('test/fixtures/vulnerable');
+export function countNodes(ast: AST, type: string): number {
+  let count = 0;
   
-  files.forEach(file => {
-    it(`transforms ${file}`, async () => {
-      const input = fs.readFileSync(`test/fixtures/vulnerable/${file}`);
-      const result = await transformer.transformFile(input);
-      
-      expect(result.code).toMatchSnapshot();
-      expect(result.diff).toMatchSnapshot();
-    });
+  traverse(ast, {
+    [type]: () => count++
   });
-});
+  
+  return count;
+}
 ```
 
-## Test Utilities
-
-### Mock Builders
+### Mock Context Builder
 
 ```typescript
-// test/utils/mocks.ts
-export function createMockContext(overrides?: Partial<FileContext>): FileContext {
+// tests/utils/context.ts
+export function createMockContext(overrides = {}): Context {
   return {
-    filePath: '/test/file.js',
-    language: 'javascript',
+    projectType: 'node',
     framework: 'express',
-    dependencies: [],
-    ast: createMockAST(),
+    dependencies: ['express', 'mysql'],
+    authentication: 'jwt',
+    routes: [
+      { method: 'GET', path: '/api/users/:id', handler: 'getUser' },
+      { method: 'POST', path: '/api/users', handler: 'createUser' }
+    ],
     ...overrides
   };
-}
-
-export function createMockIssue(overrides?: Partial<Issue>): Issue {
-  return {
-    type: 'test-issue',
-    severity: 'medium',
-    line: 1,
-    column: 1,
-    message: 'Test issue',
-    ...overrides
-  };
-}
-```
-
-### Test Helpers
-
-```typescript
-// test/utils/helpers.ts
-export async function analyzeCode(code: string): Promise<FileAnalysis> {
-  const analyzer = new FileAnalyzer();
-  return analyzer.analyzeContent(code, 'test.js');
-}
-
-export async function expectNoIssues(code: string) {
-  const analysis = await analyzeCode(code);
-  expect(analysis.issues).toHaveLength(0);
-}
-
-export async function expectIssue(code: string, type: string) {
-  const analysis = await analyzeCode(code);
-  expect(analysis.issues).toContainEqual(
-    expect.objectContaining({ type })
-  );
 }
 ```
 
@@ -469,7 +494,7 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     
-    - name: Use Node.js ${{ matrix.node-version }}
+    - name: Setup Node.js
       uses: actions/setup-node@v3
       with:
         node-version: ${{ matrix.node-version }}
@@ -486,176 +511,143 @@ jobs:
     - name: Run E2E tests
       run: npm run test:e2e
     
+    - name: Check coverage
+      run: npm run test:coverage
+    
     - name: Upload coverage
       uses: codecov/codecov-action@v3
-      with:
-        file: ./coverage/lcov.info
+      
+  performance:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - run: npm ci
+    - run: npm run test:performance
+    - name: Store benchmark result
+      uses: benchmark-action/github-action-benchmark@v1
 ```
 
-## Test Coverage Requirements
+### Pre-commit Hooks
 
-- Overall: 90%+
-- Detectors: 95%+ (critical for accuracy)
-- Fixers: 95%+ (must not break code)
-- Core Engine: 90%+
-- CLI: 80%+
-- Utilities: 70%+
+```json
+// package.json
+{
+  "husky": {
+    "hooks": {
+      "pre-commit": "npm run test:affected && npm run lint"
+    }
+  }
+}
+```
+
+## Test Coverage Goals
+
+- **Overall**: > 90%
+- **Analyzers**: > 95% (critical path)
+- **Transformers**: > 95% (critical path)
+- **Core Engine**: > 90%
+- **CLI**: > 80%
+- **Utilities**: > 85%
 
 ## Testing Best Practices
 
-### 1. Test Naming
+1. **Test Behavior, Not Implementation**
+   ```typescript
+   // ❌ Bad: Testing implementation details
+   expect(analyzer._patterns.sql.test(code)).toBe(true);
+   
+   // ✅ Good: Testing behavior
+   expect(analyzer.analyze(code)).toContainIssue('sql-injection');
+   ```
 
-```typescript
-// Good
-it('detects SQL injection when user input is concatenated in query string', ...)
+2. **Use Descriptive Test Names**
+   ```typescript
+   // ❌ Bad
+   it('works', () => {});
+   
+   // ✅ Good
+   it('detects SQL injection in template literals with user input', () => {});
+   ```
 
-// Bad
-it('works correctly', ...)
-```
+3. **Arrange-Act-Assert Pattern**
+   ```typescript
+   it('fixes hardcoded API key', async () => {
+     // Arrange
+     const code = 'const key = "sk_live_abc123";';
+     const fixer = new SecretsFixer();
+     
+     // Act
+     const result = await fixer.fix(code);
+     
+     // Assert
+     expect(result).toContain('process.env.');
+     expect(result).not.toContain('sk_live');
+   });
+   ```
 
-### 2. Test Independence
+4. **Test Edge Cases**
+   - Empty files
+   - Syntax errors
+   - Unicode in strings
+   - Very large files
+   - Deeply nested code
+   - Malformed AST
 
-Each test should be independent:
-
-```typescript
-beforeEach(() => {
-  // Fresh setup for each test
-  detector = new SQLInjectionDetector();
-  context = createMockContext();
-});
-
-afterEach(() => {
-  // Clean up if needed
-  jest.clearAllMocks();
-});
-```
-
-### 3. Test Data Builders
-
-```typescript
-class CodeBuilder {
-  private code = '';
-  
-  withFunction(name: string, body: string): this {
-    this.code += `function ${name}() { ${body} }\n`;
-    return this;
-  }
-  
-  withSQLQuery(query: string): this {
-    this.code += `db.query(${query});\n`;
-    return this;
-  }
-  
-  build(): string {
-    return this.code;
-  }
-}
-
-// Usage
-const code = new CodeBuilder()
-  .withFunction('getUser', 'return db.query("SELECT * FROM users WHERE id = " + id)')
-  .build();
-```
-
-### 4. Error Case Testing
-
-Always test error conditions:
-
-```typescript
-it('handles malformed AST gracefully', async () => {
-  const malformedAST = { type: 'Unknown' };
-  
-  expect(async () => {
-    await detector.detect(malformedAST, context);
-  }).not.toThrow();
-});
-```
-
-## Regression Testing
-
-Every bug becomes a test:
-
-```typescript
-// test/regressions/issue-123.test.ts
-describe('Regression: Issue #123 - False positive on template literals', () => {
-  it('does not flag safe template literals', async () => {
-    const code = `
-      // This was incorrectly flagged as SQL injection
-      const message = \`User \${userName} logged in\`;
-      console.log(message);
-    `;
-    
-    const issues = await analyzeCode(code);
-    const sqlInjectionIssues = issues.filter(i => i.type === 'sql-injection');
-    
-    expect(sqlInjectionIssues).toHaveLength(0);
-  });
-});
-```
-
-## Load Testing
-
-For performance validation:
-
-```typescript
-// test/load/analyzer.load.ts
-describe('Analyzer Load Tests', () => {
-  it('handles 10 concurrent file analyses', async () => {
-    const files = Array(10).fill('test/fixtures/large-file.js');
-    
-    const start = Date.now();
-    const results = await Promise.all(
-      files.map(f => analyzer.analyze(f))
-    );
-    const duration = Date.now() - start;
-    
-    expect(results).toHaveLength(10);
-    expect(duration).toBeLessThan(5000);
-  });
-});
-```
-
-## Test Reports
-
-Generate comprehensive test reports:
-
-```bash
-# Coverage report
-npm run test:coverage
-
-# HTML report
-npm run test:report
-
-# Performance report
-npm run test:perf -- --reporter=html
-```
+5. **Mock External Dependencies**
+   ```typescript
+   jest.mock('fs/promises', () => ({
+     readFile: jest.fn().mockResolvedValue('mock file content')
+   }));
+   ```
 
 ## Debugging Tests
 
-### VS Code Launch Configuration
+### Verbose Logging
 
-```json
-{
-  "type": "node",
-  "request": "launch",
-  "name": "Debug Jest Test",
-  "program": "${workspaceFolder}/node_modules/.bin/jest",
-  "args": [
-    "--runInBand",
-    "--no-coverage",
-    "${relativeFile}"
-  ],
-  "console": "integratedTerminal"
+```typescript
+// Enable debug logging in tests
+beforeAll(() => {
+  process.env.LOG_LEVEL = 'debug';
+});
+
+// Use debug helper
+function debugAST(ast: AST) {
+  console.log(JSON.stringify(ast, null, 2));
 }
 ```
 
-### Test Debugging Tips
+### Test Isolation
 
-1. Use `test.only()` to run single test
-2. Add `debugger` statements
-3. Use verbose logging in tests
-4. Inspect AST structure with `console.dir(ast, { depth: null })`
+```typescript
+// Ensure tests don't affect each other
+beforeEach(() => {
+  jest.clearAllMocks();
+  // Reset any global state
+});
 
-## Conclusion
+afterEach(() => {
+  // Clean up temp files
+});
+```
 
-A comprehensive testing strategy ensures ProdReady reliably transforms AI-generated code into production-ready applications. By testing with real AI-generated patterns and maintaining high coverage, we build confidence in our transformations and catch regressions early.
+## Future Testing Enhancements
+
+1. **Property-Based Testing**
+   - Generate random code samples
+   - Ensure fixes don't break valid code
+
+2. **Mutation Testing**
+   - Verify test quality
+   - Find gaps in coverage
+
+3. **Fuzz Testing**
+   - Test with malformed input
+   - Ensure graceful handling
+
+4. **Visual Regression Testing**
+   - Screenshot CLI output
+   - Ensure consistent formatting
+
+5. **Benchmark Suite**
+   - Track performance over time
+   - Prevent performance regressions
