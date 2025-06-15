@@ -2,472 +2,523 @@
 
 ## Overview
 
-ProdReady uses a modular, plugin-based architecture designed for extensibility, performance, and developer experience. The system is built around a core engine with language-specific adapters and pluggable detectors/fixers.
+ProdReady uses a modular, plugin-based architecture designed for extensibility, maintainability, and performance. This document outlines the core architecture decisions and patterns.
 
-## Architecture Diagram
+## Design Principles
+
+1. **Modularity**: Each analyzer and transformer is self-contained
+2. **Extensibility**: Easy to add new languages, checks, and fixes
+3. **Safety**: Never break working code
+4. **Performance**: Handle large codebases efficiently
+5. **Education**: Every interaction teaches best practices
+
+## System Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        CLI Interface                         │
-│  (Commander.js, Inquirer.js, Chalk, Ora, Blessed)          │
-├─────────────────────────────────────────────────────────────┤
-│                         Core Engine                          │
-│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────┐   │
-│  │  Analyzer   │  │ Transformer  │  │    Reporter     │   │
-│  │   Engine    │  │    Engine    │  │     Engine      │   │
-│  └─────────────┘  └──────────────┘  └─────────────────┘   │
-├─────────────────────────────────────────────────────────────┤
-│                      Plugin System                           │
-│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────┐   │
-│  │  Detectors  │  │    Fixers    │  │   Formatters    │   │
-│  │  (100+)     │  │   (100+)     │  │  (Term/HTML)    │   │
-│  └─────────────┘  └──────────────┘  └─────────────────┘   │
-├─────────────────────────────────────────────────────────────┤
-│                    Language Adapters                         │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
-│  │  Node.js │  │  Python  │  │    Go    │  │   Ruby   │  │
-│  │  (TS/JS) │  │          │  │          │  │          │  │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│                     AST Processors                           │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
-│  │  Babel   │  │   AST    │  │  go/ast  │  │  Parser  │  │
-│  │          │  │          │  │          │  │          │  │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘  │
-└─────────────────────────────────────────────────────────────┘
+│                      CLI Interface                          │
+│  (Beautiful terminal UI, progress tracking, interactive)    │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+┌─────────────────────────┴───────────────────────────────────┐
+│                     Core Engine                             │
+│  (Orchestration, scoring, conflict resolution)              │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+        ┌─────────────────┼─────────────────┬─────────────────┐
+        │                 │                 │                 │
+┌───────┴───────┐ ┌───────┴───────┐ ┌─────┴───────┐ ┌────────┴────────┐
+│   Language    │ │   Analyzer    │ │ Transformer │ │    Reporter     │
+│   Adapters    │ │   Registry    │ │   Engine    │ │    System       │
+└───────────────┘ └───────────────┘ └─────────────┘ └─────────────────┘
+        │                 │                 │                 │
+┌───────┴───────┐ ┌───────┴───────┐ ┌─────┴───────┐ ┌────────┴────────┐
+│  JavaScript   │ │   Security    │ │    Fixes    │ │      HTML       │
+│   Python      │ │  Reliability  │ │  Templates  │ │      JSON       │
+│     Go        │ │ Performance   │ │  Strategies │ │      PDF        │
+└───────────────┘ └───────────────┘ └─────────────┘ └─────────────────┘
 ```
 
 ## Core Components
 
-### 1. CLI Interface Layer
+### 1. CLI Interface (`/src/cli`)
 
-Provides a beautiful, interactive command-line experience:
+The CLI provides a beautiful, interactive experience:
 
 ```typescript
-interface CLICommand {
-  name: string;
-  description: string;
-  options: CommandOption[];
-  action: (options: any) => Promise<void>;
-}
-
-class CLI {
-  commands: Map<string, CLICommand>;
-  ui: UIRenderer;
-  
-  async run(args: string[]): Promise<void> {
-    const command = this.parseCommand(args);
-    await this.executeCommand(command);
-  }
+interface CLIOptions {
+  interactive: boolean;  // Interactive fix selection
+  preview: boolean;      // Show diff before applying
+  format: OutputFormat;  // json, pretty, quiet
+  fix: boolean;         // Auto-fix issues
+  categories: string[]; // Filter by category
 }
 ```
 
-### 2. Core Engine
+Key features:
+- Real-time progress with spinners
+- Beautiful diff visualization
+- Interactive fix selection
+- Undo capability
+- Score animation
 
-#### Analyzer Engine
+### 2. Core Engine (`/src/core`)
 
-Orchestrates the analysis process:
+The engine orchestrates the analysis and transformation pipeline:
 
 ```typescript
-class AnalyzerEngine {
-  private languageAdapters: Map<string, ILanguageAdapter>;
-  private detectorRegistry: DetectorRegistry;
-  private contextAnalyzer: ContextAnalyzer;
-  private cache: AnalysisCache;
-  
-  async analyzeProject(path: string, options: AnalyzeOptions): Promise<ProjectAnalysis> {
-    const files = await this.findFiles(path, options);
-    const analyses = await this.parallelAnalyze(files);
-    const projectContext = await this.buildProjectContext(analyses);
+class ProdReadyEngine {
+  async analyze(projectPath: string): Promise<AnalysisResult> {
+    // 1. Discover files
+    const files = await this.discoverFiles(projectPath);
     
-    return {
-      files: analyses,
-      score: this.calculateScore(analyses),
-      summary: this.generateSummary(analyses),
-      context: projectContext
-    };
-  }
-  
-  private async parallelAnalyze(files: string[]): Promise<FileAnalysis[]> {
-    const workers = this.createWorkerPool();
-    return await Promise.all(
-      files.map(file => workers.analyze(file))
-    );
-  }
-}
-```
-
-#### Transformer Engine
-
-Applies fixes to code:
-
-```typescript
-class TransformerEngine {
-  private fixerRegistry: FixerRegistry;
-  private validator: TransformValidator;
-  
-  async transform(
-    analysis: FileAnalysis,
-    options: TransformOptions
-  ): Promise<TransformResult> {
-    const applicableFixes = this.selectFixes(analysis.issues, options);
-    const orderedFixes = this.orderFixes(applicableFixes);
+    // 2. Parse files into AST
+    const asts = await this.parseFiles(files);
     
-    let code = analysis.content;
-    const applied: AppliedFix[] = [];
+    // 3. Build project context
+    const context = await this.buildContext(asts, projectPath);
     
-    for (const fix of orderedFixes) {
-      const result = await this.applyFix(code, fix);
-      if (await this.validator.validate(result)) {
-        code = result.code;
-        applied.push(result.metadata);
-      }
-    }
+    // 4. Run analyzers
+    const issues = await this.runAnalyzers(asts, context);
     
-    return { code, applied, diff: this.generateDiff(analysis.content, code) };
+    // 5. Calculate score
+    const score = this.calculateScore(issues);
+    
+    return { files, issues, score, context };
+  }
+  
+  async fix(analysisResult: AnalysisResult): Promise<FixResult> {
+    // 1. Order fixes by priority and compatibility
+    const orderedFixes = this.orderFixes(analysisResult.issues);
+    
+    // 2. Apply fixes with conflict resolution
+    const results = await this.applyFixes(orderedFixes);
+    
+    // 3. Validate fixed code
+    await this.validateFixes(results);
+    
+    return results;
   }
 }
 ```
 
-#### Reporter Engine
+### 3. Language Adapters (`/src/languages`)
 
-Generates various output formats:
-
-```typescript
-class ReporterEngine {
-  private formatters: Map<string, IFormatter>;
-  
-  async generate(
-    analysis: ProjectAnalysis,
-    format: ReportFormat,
-    options: ReportOptions
-  ): Promise<Report> {
-    const formatter = this.formatters.get(format);
-    return await formatter.format(analysis, options);
-  }
-}
-```
-
-### 3. Plugin System
-
-#### Detector Interface
-
-```typescript
-interface IDetector {
-  id: string;
-  name: string;
-  category: DetectorCategory;
-  severity: Severity;
-  languages: string[];
-  
-  detect(ast: AST, context: FileContext): Promise<Issue[]>;
-  
-  // Metadata for education
-  description: string;
-  rationale: string;
-  examples: {
-    vulnerable: string;
-    secure: string;
-  };
-  references: string[];
-}
-```
-
-#### Fixer Interface
-
-```typescript
-interface IFixer {
-  id: string;
-  name: string;
-  detectorsHandled: string[];
-  
-  canFix(issue: Issue): boolean;
-  
-  generateFix(
-    issue: Issue,
-    ast: AST,
-    context: FileContext
-  ): Promise<Fix>;
-  
-  // Educational content
-  explanation: string;
-  caveats?: string[];
-}
-```
-
-### 4. Language Adapters
+Each language has an adapter that provides parsing and code generation:
 
 ```typescript
 interface ILanguageAdapter {
-  language: string;
+  name: string;
   extensions: string[];
-  frameworks: string[];
   
-  // Parsing
-  canParse(file: string): boolean;
-  parse(content: string): Promise<AST>;
+  // Parse code into AST
+  parse(code: string, options?: ParseOptions): Promise<AST>;
   
-  // AST operations
+  // Generate code from AST
+  generate(ast: AST, options?: GenerateOptions): string;
+  
+  // Traverse AST with visitors
   traverse(ast: AST, visitors: Visitors): void;
-  findNodes(ast: AST, predicate: NodePredicate): Node[];
   
-  // Code generation
-  generate(ast: AST): string;
+  // Language-specific analyzers
+  getAnalyzers(): IAnalyzer[];
   
-  // Language-specific
-  getDetectors(): IDetector[];
-  getFixers(): IFixer[];
-  getFrameworkPatterns(): FrameworkPattern[];
+  // Language-specific transformers
+  getTransformers(): ITransformer[];
 }
 ```
 
-## Data Flow
+### 4. Analyzer System (`/src/analyzers`)
 
-```
-1. User runs: prodready scan ./project
-
-2. File Discovery
-   └─> Find all source files
-   └─> Filter by .prodreadyignore
-   └─> Group by language
-
-3. Parallel Analysis (per file)
-   └─> Parse to AST
-   └─> Run detectors
-   └─> Analyze context
-   └─> Calculate file score
-
-4. Project Analysis
-   └─> Aggregate issues
-   └─> Detect patterns
-   └─> Build dependency graph
-   └─> Calculate project score
-
-5. Transformation (if requested)
-   └─> Order fixes by dependency
-   └─> Apply fixes sequentially
-   └─> Validate each transformation
-   └─> Generate diffs
-
-6. Reporting
-   └─> Format results
-   └─> Generate visualizations
-   └─> Create audit trail
-   └─> Output to chosen format
-```
-
-## Performance Architecture
-
-### Parallel Processing
+Analyzers detect issues in code:
 
 ```typescript
-class WorkerPool {
-  private workers: Worker[];
-  private queue: TaskQueue;
+interface IAnalyzer {
+  id: string;
+  name: string;
+  category: AnalyzerCategory;
+  severity: Severity;
   
-  constructor(size: number = os.cpus().length) {
-    this.workers = Array(size).fill(null).map(() => 
-      new Worker('./analyzer-worker.js')
-    );
-  }
+  // Detect issues in AST
+  analyze(ast: AST, context: Context): Promise<Issue[]>;
   
-  async analyze(file: string): Promise<FileAnalysis> {
-    const worker = await this.getAvailableWorker();
-    return await worker.analyze(file);
-  }
+  // Check if analyzer applies to file
+  shouldRun(filePath: string, context: Context): boolean;
+  
+  // Get education content
+  getEducation(): Education;
+}
+
+interface Issue {
+  analyzerId: string;
+  severity: Severity;
+  category: Category;
+  location: Location;
+  message: string;
+  impact: string;
+  fix?: IFix;
+  education?: Education;
 }
 ```
 
-### Caching Strategy
+### 5. Transformer System (`/src/transformers`)
+
+Transformers apply fixes to code:
 
 ```typescript
-class AnalysisCache {
-  private fileCache: LRUCache<string, FileAnalysis>;
-  private astCache: LRUCache<string, AST>;
+interface ITransformer {
+  id: string;
+  analyzerId: string;
   
-  async getOrAnalyze(
-    file: string,
-    analyzer: () => Promise<FileAnalysis>
-  ): Promise<FileAnalysis> {
-    const hash = await this.hashFile(file);
-    
-    if (this.fileCache.has(hash)) {
-      return this.fileCache.get(hash);
-    }
-    
-    const analysis = await analyzer();
-    this.fileCache.set(hash, analysis);
-    return analysis;
-  }
+  // Check if fix can be applied
+  canFix(issue: Issue, ast: AST): boolean;
+  
+  // Apply fix to AST
+  fix(issue: Issue, ast: AST, context: Context): Promise<FixResult>;
+  
+  // Preview fix without applying
+  preview(issue: Issue, ast: AST): Promise<DiffPreview>;
+  
+  // Get fix metadata
+  getMetadata(): FixMetadata;
 }
 ```
 
-### Incremental Analysis
+### 6. Context System (`/src/context`)
+
+Context provides semantic understanding:
 
 ```typescript
-class IncrementalAnalyzer {
-  private baseline: Map<string, FileAnalysis>;
-  
-  async analyzeChanges(
-    projectPath: string,
-    since: Date
-  ): Promise<IncrementalResult> {
-    const changed = await this.git.getChangedFiles(since);
-    const analyses = await this.analyzeFiles(changed);
-    
+class ContextBuilder {
+  async build(asts: Map<string, AST>, projectPath: string): Promise<Context> {
     return {
-      changed: analyses,
-      unchanged: this.baseline.filter(f => !changed.includes(f)),
-      summary: this.compareToBaseline(analyses)
+      // Project-level context
+      projectType: await this.detectProjectType(projectPath),
+      dependencies: await this.analyzeDependencies(projectPath),
+      framework: await this.detectFramework(asts),
+      
+      // File-level context
+      files: await this.analyzeFiles(asts),
+      
+      // Semantic context
+      routes: this.extractRoutes(asts),
+      models: this.extractModels(asts),
+      services: this.extractServices(asts),
+      
+      // Security context  
+      authentication: this.detectAuthPatterns(asts),
+      dataFlows: this.analyzeDataFlows(asts),
+      
+      // Performance context
+      hotPaths: this.identifyHotPaths(asts),
+      queryPatterns: this.analyzeQueries(asts)
     };
   }
 }
 ```
 
-## Storage
+## Plugin Architecture
 
-### Configuration
+### Plugin Interface
 
 ```typescript
-interface ProdReadyConfig {
-  // Project config (.prodreadyrc)
-  extends?: string;
-  rules?: RuleConfig;
-  ignore?: string[];
-  severity?: SeverityOverrides;
+interface IProdReadyPlugin {
+  name: string;
+  version: string;
   
-  // User config (~/.prodready/config)
-  telemetry?: boolean;
-  theme?: 'dark' | 'light';
-  editor?: string;
+  // Register components
+  register(registry: PluginRegistry): void;
   
-  // Team config (.prodready/team.json)
-  standards?: TeamStandards;
-  customRules?: CustomRule[];
-  integrations?: IntegrationConfig;
+  // Lifecycle hooks
+  onBeforeAnalysis?(context: Context): Promise<void>;
+  onAfterAnalysis?(result: AnalysisResult): Promise<void>;
+  onBeforeFix?(issues: Issue[]): Promise<void>;
+  onAfterFix?(results: FixResult[]): Promise<void>;
 }
 ```
 
-### State Management
+### Creating a Plugin
 
 ```typescript
-class StateManager {
-  private projectState: ProjectState;
-  private userState: UserState;
+export class CustomSecurityPlugin implements IProdReadyPlugin {
+  name = 'custom-security';
+  version = '1.0.0';
   
-  async saveBaseline(analysis: ProjectAnalysis): Promise<void> {
-    await this.db.put('baseline', {
-      timestamp: Date.now(),
-      analysis: analysis,
-      version: VERSION
-    });
-  }
-  
-  async getHistory(): Promise<AnalysisHistory> {
-    return await this.db.getAll('analyses');
+  register(registry: PluginRegistry) {
+    // Add custom analyzer
+    registry.addAnalyzer(new CustomSQLAnalyzer());
+    
+    // Add custom transformer
+    registry.addTransformer(new CustomSQLFixer());
+    
+    // Add custom reporter
+    registry.addReporter(new SecurityReporter());
   }
 }
 ```
 
-## Extension Points
+## Performance Optimizations
 
-### Custom Detectors
+### 1. Parallel Processing
 
 ```typescript
-// In .prodready/detectors/custom-api-versioning.js
-module.exports = {
-  id: 'custom-api-versioning',
-  category: 'operational',
+class ParallelAnalyzer {
+  async analyzeFiles(files: string[]): Promise<Map<string, Issue[]>> {
+    // Process files in parallel with concurrency limit
+    const limit = pLimit(os.cpus().length);
+    
+    const results = await Promise.all(
+      files.map(file => limit(() => this.analyzeFile(file)))
+    );
+    
+    return new Map(results);
+  }
+}
+```
+
+### 2. Incremental Analysis
+
+```typescript
+class IncrementalAnalyzer {
+  private cache: AnalysisCache;
   
-  detect(ast, context) {
-    const issues = [];
+  async analyze(projectPath: string): Promise<AnalysisResult> {
+    // Get changed files since last run
+    const changedFiles = await this.getChangedFiles(projectPath);
     
-    // Find all route definitions
-    const routes = findRoutes(ast);
+    // Analyze only changed files
+    const newResults = await this.analyzeFiles(changedFiles);
     
-    routes.forEach(route => {
-      if (!route.path.includes('/v1/') && !route.path.includes('/v2/')) {
+    // Merge with cached results
+    return this.mergeResults(this.cache.get(projectPath), newResults);
+  }
+}
+```
+
+### 3. AST Caching
+
+```typescript
+class ASTCache {
+  private cache = new LRU<string, CachedAST>({ 
+    max: 500,
+    maxAge: 1000 * 60 * 5 // 5 minutes
+  });
+  
+  async getAST(filePath: string): Promise<AST> {
+    const hash = await this.hashFile(filePath);
+    const cached = this.cache.get(hash);
+    
+    if (cached && cached.hash === hash) {
+      return cached.ast;
+    }
+    
+    const ast = await this.parseFile(filePath);
+    this.cache.set(hash, { ast, hash });
+    
+    return ast;
+  }
+}
+```
+
+## Error Handling
+
+### Graceful Degradation
+
+```typescript
+class ResilientAnalyzer {
+  async analyze(ast: AST): Promise<Issue[]> {
+    const issues: Issue[] = [];
+    
+    for (const analyzer of this.analyzers) {
+      try {
+        const analyzerIssues = await analyzer.analyze(ast);
+        issues.push(...analyzerIssues);
+      } catch (error) {
+        // Log but don't fail entire analysis
+        this.logger.error(`Analyzer ${analyzer.id} failed:`, error);
+        
+        // Add error as low-priority issue
         issues.push({
-          type: 'missing-api-version',
-          line: route.line,
-          message: 'API endpoint missing version in path'
+          analyzerId: 'system',
+          severity: 'info',
+          message: `Analyzer ${analyzer.id} encountered an error`,
+          category: 'system'
         });
       }
-    });
+    }
     
     return issues;
   }
-};
+}
 ```
 
-### Framework Adapters
+### Recovery Mechanisms
 
 ```typescript
-// Framework-specific patterns
-class ExpressAdapter implements IFrameworkAdapter {
-  detectPatterns(ast: AST): FrameworkPattern[] {
-    return [
-      this.findMiddleware(ast),
-      this.findRoutes(ast),
-      this.findErrorHandlers(ast)
-    ];
-  }
-  
-  enhanceContext(context: FileContext): void {
-    context.framework = 'express';
-    context.middleware = this.extractMiddleware(context.ast);
-    context.routes = this.extractRoutes(context.ast);
+class SafeTransformer {
+  async applyFix(code: string, fix: IFix): Promise<string> {
+    // Create backup
+    const backup = code;
+    
+    try {
+      // Apply fix
+      const fixed = await fix.apply(code);
+      
+      // Validate syntax
+      await this.validateSyntax(fixed);
+      
+      return fixed;
+    } catch (error) {
+      // Rollback on error
+      this.logger.error('Fix failed, rolling back:', error);
+      return backup;
+    }
   }
 }
 ```
 
-## Security & Privacy
+## Configuration
 
-### Code Security
+### Project Configuration
 
-- Never execute user code
-- All analysis done via AST
-- Sandboxed worker processes
-- No network calls during analysis
+```yaml
+# .prodready.yml
+version: 1
+language: javascript
+framework: express
+
+# Customize analyzers
+analyzers:
+  security:
+    sql-injection:
+      enabled: true
+      severity: critical
+  performance:
+    n-plus-one:
+      enabled: true
+      threshold: 5
+
+# Custom rules
+rules:
+  - id: company-auth
+    pattern: 'route\((.*)\)'
+    require: 'authenticate()'
+    message: 'All routes must use company auth middleware'
+
+# Ignore patterns
+ignore:
+  - '**/*.test.js'
+  - 'build/**'
+  - 'node_modules/**'
+
+# Fix preferences
+fixes:
+  prefer-async: true
+  error-handler: winston
+  validation-library: joi
+```
+
+### Global Configuration
+
+```typescript
+// ~/.prodready/config.json
+{
+  "telemetry": false,
+  "autoUpdate": true,
+  "defaultFormat": "pretty",
+  "education": true,
+  "githubToken": "***",
+  "plugins": [
+    "@company/prodready-plugin"
+  ]
+}
+```
+
+## Security Considerations
+
+### Code Execution Safety
+
+- Never execute analyzed code
+- Use static AST analysis only
+- Sandbox file system access
+- Validate all inputs
 
 ### Privacy
 
 - Local analysis by default
-- Opt-in telemetry
-- No code leaves machine without permission
-- Encrypted storage for sensitive configs
+- No code transmission without consent
+- Configurable telemetry
+- Audit logs for compliance
 
-## Future Architecture
+## Testing Infrastructure
 
-### Cloud Analysis Service (Optional)
-
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   CLI Client │────▶│  API Gateway │────▶│   Analysis   │
-└──────────────┘     └──────────────┘     │   Workers    │
-                                           └──────────────┘
-                                                  │
-                                           ┌──────────────┐
-                                           │   Results    │
-                                           │    Cache     │
-                                           └──────────────┘
-```
-
-### IDE Integration
+### Analyzer Testing
 
 ```typescript
-// Language Server Protocol implementation
-class ProdReadyLanguageServer {
-  async onDidOpenTextDocument(params: DidOpenTextDocumentParams) {
-    const analysis = await this.analyzer.analyzeFile(params.textDocument.uri);
-    this.publishDiagnostics(analysis.issues);
-  }
+describe('SQLInjectionAnalyzer', () => {
+  const analyzer = new SQLInjectionAnalyzer();
   
-  async onCodeAction(params: CodeActionParams): Promise<CodeAction[]> {
-    const fixes = await this.fixer.getAvailableFixes(params.range);
-    return fixes.map(fix => this.fixToCodeAction(fix));
-  }
-}
+  it('detects string concatenation', async () => {
+    const code = `db.query("SELECT * FROM users WHERE id = " + id)`;
+    const ast = parse(code);
+    const issues = await analyzer.analyze(ast);
+    
+    expect(issues).toHaveLength(1);
+    expect(issues[0].severity).toBe('critical');
+  });
+  
+  it('ignores parameterized queries', async () => {
+    const code = `db.query("SELECT * FROM users WHERE id = ?", [id])`;
+    const ast = parse(code);
+    const issues = await analyzer.analyze(ast);
+    
+    expect(issues).toHaveLength(0);
+  });
+});
 ```
 
-This architecture provides a solid foundation for building ProdReady while maintaining flexibility for future enhancements.
+### Transform Testing
+
+```typescript
+describe('ErrorHandlingTransformer', () => {
+  const transformer = new ErrorHandlingTransformer();
+  
+  it('wraps async function in try-catch', async () => {
+    const input = `async function getUser() { return await api.get(); }`;
+    const expected = `async function getUser() { 
+      try { 
+        return await api.get(); 
+      } catch (error) {
+        logger.error('getUser failed:', error);
+        throw error;
+      }
+    }`;
+    
+    const result = await transformer.fix(input);
+    expect(normalize(result)).toBe(normalize(expected));
+  });
+});
+```
+
+## Future Considerations
+
+### AI Integration
+
+- ML models for pattern detection
+- Natural language fix explanations
+- Predictive issue detection
+- Code quality forecasting
+
+### Cloud Features
+
+- Distributed analysis for large codebases
+- Team dashboards
+- Historical tracking
+- CI/CD deep integration
+
+### Ecosystem
+
+- Package manager for plugins
+- Community analyzer marketplace
+- Integration with IDEs
+- Educational platform
